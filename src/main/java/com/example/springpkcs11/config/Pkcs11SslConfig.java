@@ -17,6 +17,7 @@ import org.springframework.stereotype.Component;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.net.InetAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -44,7 +45,7 @@ public class Pkcs11SslConfig implements WebServerFactoryCustomizer<TomcatServlet
     String pin;
 
     @Value("${pkcs11.key-alias:mykey}")
-    String keyAlias;
+    public String keyAlias;
 
     @Value("${pkcs11.management-port:8080}")
     public int managementPort;
@@ -66,9 +67,8 @@ public class Pkcs11SslConfig implements WebServerFactoryCustomizer<TomcatServlet
         ssl.setBundle(BUNDLE_NAME);
         factory.setSsl(ssl);
 
-        // Plain HTTP connector used exclusively for management (e.g. /ssl/reload).
-        // This port remains reachable even when the HTTPS key is temporarily unavailable
-        // during certificate rotation.
+        // Plain HTTP connector bound to loopback, used as a management fallback
+        // (e.g. emergency reload if HTTPS becomes unavailable for any reason).
         factory.addAdditionalConnectors(createManagementConnector(managementPort));
     }
 
@@ -77,6 +77,8 @@ public class Pkcs11SslConfig implements WebServerFactoryCustomizer<TomcatServlet
         connector.setScheme("http");
         connector.setPort(port);
         connector.setSecure(false);
+        ((Http11NioProtocol) connector.getProtocolHandler())
+                .setAddress(InetAddress.getLoopbackAddress());
         return connector;
     }
 
@@ -103,8 +105,8 @@ public class Pkcs11SslConfig implements WebServerFactoryCustomizer<TomcatServlet
     /**
      * Loads the PKCS#11 KeyStore from the HSM token.
      * The HSM is the backing store — load(null, pin) connects to the token and
-     * reads the current objects. Calling this again after HSM objects are replaced
-     * returns a fresh view reflecting the new key and certificate.
+     * reads the current objects. A new KeyStore instance always reflects the
+     * current state of the HSM (keys present at load time).
      */
     public KeyStore loadKeyStore(Provider provider) {
         try {
@@ -117,12 +119,21 @@ public class Pkcs11SslConfig implements WebServerFactoryCustomizer<TomcatServlet
     }
 
     /**
-     * Builds a Spring Boot SslBundle from a PKCS#11 KeyStore.
-     * Called both at startup and during hot-reload.
+     * Builds a Spring Boot SslBundle using the configured default key alias.
+     * Called at startup.
      */
     public SslBundle buildBundle(KeyStore keyStore) {
+        return buildBundle(keyStore, keyAlias);
+    }
+
+    /**
+     * Builds a Spring Boot SslBundle using an explicit key alias.
+     * Used during rolling rotation to target a staging alias before it is
+     * promoted to the canonical alias.
+     */
+    public SslBundle buildBundle(KeyStore keyStore, String alias) {
         SslStoreBundle stores = SslStoreBundle.of(keyStore, pin, null);
-        SslBundleKey key = SslBundleKey.of(pin, keyAlias);
+        SslBundleKey key = SslBundleKey.of(pin, alias);
         return SslBundle.of(stores, key);
     }
 
