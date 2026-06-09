@@ -1,0 +1,19 @@
+server:
+  port: 8443
+
+pkcs11:
+  # Path to the SunPKCS11 provider config file.
+  # Can be a relative path (resolved against the working directory)
+  # or an absolute path. Falls back to classpath lookup.
+  config-file: src/main/resources/pkcs11.cfg
+
+  # User PIN set when the SoftHSM token was initialised (see setup-softhsm.sh).
+  pin: "1234"
+
+  # Label used when the private key was imported into SoftHSM.
+  key-alias: mykey
+
+  # Plain HTTP port used for management operations (e.g. POST /ssl/reload).
+  # This port remains reachable during certificate rotation when HTTPS may be
+  # temporarily unavailable. Only accessible locally — do not expose externally.
+  management-port: 8080
