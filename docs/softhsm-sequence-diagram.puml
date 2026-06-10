@@ -1,0 +1,255 @@
+@startuml softhsm-sequence-diagram
+title SoftHSM2 — First-run · Application Startup · Certificate Rotation\n<size:11><color:#888>setup-softhsm.sh  +  Pkcs11SslConfig  +  SslReloadController</color></size>
+
+skinparam monochrome false
+skinparam shadowing false
+skinparam defaultFontName "Courier New"
+skinparam defaultFontSize 11
+skinparam sequenceArrowThickness 1.5
+skinparam sequenceGroupBorderThickness 1
+skinparam noteBackgroundColor #F8F8FF
+skinparam noteBorderColor #AAAACC
+skinparam noteFontSize 10
+skinparam noteFontName "Courier New"
+skinparam BoxPadding 12
+
+' ── Box: Operator ────────────────────────────────────────────────────────────
+box "Operator" #EEFBEE
+  actor       Script   as "setup-softhsm.sh\n<size:9>(operator script)</size>"
+  participant OpenSSL  as "OpenSSL"
+end box
+
+' ── Box: SoftHSM Token ───────────────────────────────────────────────────────
+box "SoftHSM Token" #FFF0F0
+  database    HSM      as "SoftHSM\n<size:9>(token / PKCS#11 KeyStore)</size>"
+end box
+
+' ── Box: Spring Boot Application ─────────────────────────────────────────────
+box "Spring Boot Application" #EFEFFF
+  participant CfgFile  as "pkcs11.cfg\n<size:9>(SunPKCS11 config file)</size>"
+  control     Config   as "Pkcs11SslConfig\n<size:9>@Component</size>"
+  boundary    Endpoint as "SslReloadController\n<size:9>POST /ssl/reload</size>"
+  participant Tomcat   as "Spring Boot\n<size:9>Tomcat + SslBundleRegistry</size>"
+end box
+
+' ════════════════════════════════════════════════════════════════════════════
+' ① FIRST RUN
+' ════════════════════════════════════════════════════════════════════════════
+
+group #D0E8FF ① FIRST RUN — initialise token and import canonical key+cert; application not yet started
+
+  Script -> HSM : softhsm2-util --init-token --free\n       --label springboot --pin 1234 --so-pin 0000
+  note over HSM
+    <b>HSM after token init</b>
+    [empty — token created, no PKCS#11 objects]
+  end note
+
+  Script -> OpenSSL : openssl genrsa -out server.key 2048
+  Script -> OpenSSL : openssl req -new -x509 -key server.key\n        -days 365 -subj "/CN=localhost/..."
+  Script -> OpenSSL : openssl pkcs8 -topk8 -nocrypt  → server.key.der
+  Script -> OpenSSL : openssl x509 -outform DER       → server.crt.der
+  OpenSSL --> Script : RSA-2048 private key + self-signed cert (DER format)
+
+  Script -> HSM : pkcs11-tool --write-object server.key.der\n             --type privkey --id 01 --label mykey
+  Script -> HSM : pkcs11-tool --write-object server.crt.der\n             --type cert    --id 01 --label mykey
+
+  note over HSM
+    <b>HSM — first-run import complete</b>
+    privkey  mykey  (ID=01)
+    cert     mykey  (ID=01)
+  end note
+
+end
+
+' ════════════════════════════════════════════════════════════════════════════
+' ② APPLICATION STARTUP
+' ════════════════════════════════════════════════════════════════════════════
+
+group #D8F0D8 ② APPLICATION STARTUP — Spring Boot starts; Pkcs11SslConfig.customize() called by framework
+
+  Tomcat -> Config : customize(TomcatServletWebServerFactory)
+  activate Config
+
+    ' ── registerProvider() ──────────────────────────────────────────────────
+    Config -> CfgFile : resolveConfigFilePath()\n→ locate pkcs11.cfg\n   (filesystem path, else classpath → temp file)
+    activate CfgFile
+    CfgFile --> Config : absolute path to pkcs11.cfg
+    deactivate CfgFile
+
+    Config -> Config : Security.getProvider("SunPKCS11-SoftHSM")\n→ null on first start
+    Config -> Config : Security.getProvider("SunPKCS11")\n        .configure("/path/to/pkcs11.cfg")
+    Config -> Config : Security.addProvider(provider)\n→ registered as "SunPKCS11-SoftHSM" in JVM
+
+    note over Config
+      <b>SunPKCS11 provider registered</b>
+      Name:  SunPKCS11-SoftHSM
+      Scope: JVM lifetime — reused on every reload;
+             never re-registered.
+    end note
+
+    ' ── loadKeyStore() ──────────────────────────────────────────────────────
+    Config -> HSM : KeyStore.getInstance("PKCS11", provider)
+    Config -> HSM : keyStore.load(null, pin="1234")\n→ opens PKCS#11 session, reads token objects
+    activate HSM
+    HSM --> Config : KeyStore containing:\n  privkey  mykey  (ID=01)\n  cert     mykey  (ID=01)
+    deactivate HSM
+
+    ' ── buildBundle() ───────────────────────────────────────────────────────
+    Config -> Config : buildBundle(keyStore)\n→ buildBundle(keyStore, keyAlias="mykey")\n   SslStoreBundle.of(keyStore, pin, null)\n   SslBundleKey.of(pin, "mykey")\n   SslBundle.of(stores, key)
+
+    ' ── wire into Tomcat ────────────────────────────────────────────────────
+    Config -> Tomcat : sslBundleRegistry.registerBundle(\n    "pkcs11-bundle", sslBundle)
+    note right of Tomcat
+      Spring Boot automatically attaches a change
+      listener to "pkcs11-bundle".  Calling
+      updateBundle() later will invoke
+      SslConnectorCustomizer.update() in-place.
+    end note
+
+    Config -> Tomcat : factory.setSsl(ssl)\n→ ssl.bundle = "pkcs11-bundle"\n→ wires HTTPS connector → bundle
+    Config -> Tomcat : factory.addAdditionalConnectors(\n    HTTP loopback connector :8080)\n→ plain-HTTP management fallback
+
+  deactivate Config
+
+  Tomcat -> Tomcat : start embedded server
+  note over Tomcat
+    <b>Application ready</b>
+    HTTPS :8443 → TLS cert alias: mykey (ID=01)
+    HTTP  :8080 → loopback only (emergency reload)
+  end note
+
+end
+
+' ════════════════════════════════════════════════════════════════════════════
+' ③ ROTATION
+' ════════════════════════════════════════════════════════════════════════════
+
+group #EDE0FF ③ ROTATION — dual-alias rolling swap; HTTPS stays live throughout
+
+  ' ── Generate new material ──────────────────────────────────────────────────
+  Script -> OpenSSL : openssl genrsa + req -x509  (new key + cert → DER)
+  OpenSSL --> Script : new RSA-2048 key + self-signed cert
+
+  ' ── Import staging objects ─────────────────────────────────────────────────
+  Script -> HSM : pkcs11-tool --delete-object privkey+cert ID=02\n             (cleanup any leftover staging objects)
+  Script -> HSM : pkcs11-tool --write-object privkey  label=mykey-staging  ID=02
+  Script -> HSM : pkcs11-tool --write-object cert     label=mykey-staging  ID=02
+
+  note over HSM
+    <b>HSM after staging import</b>
+    privkey  mykey          (ID=01)  ← Tomcat active; HTTPS live
+    cert     mykey          (ID=01)  ← Tomcat active; HTTPS live
+    privkey  mykey-staging  (ID=02)  ← new material; not yet active
+    cert     mykey-staging  (ID=02)  ← new material; not yet active
+  end note
+
+  ' ── Reload #1 — switch Tomcat to staging ───────────────────────────────────
+
+  Script -> Endpoint : POST https://localhost:8443/ssl/reload?alias=mykey-staging\n<size:9>(HTTPS still works — old mykey is untouched)</size>
+  activate Endpoint
+
+    Endpoint -> Endpoint : Security.getProvider("SunPKCS11-SoftHSM")\n→ returns provider registered at startup\n  (same instance, no re-registration)
+
+    Endpoint -> Endpoint : effectiveAlias = "mykey-staging"\n(from ?alias= request param)
+
+    Endpoint -> Config : loadKeyStore(provider)
+    activate Config
+      Config -> HSM : KeyStore.getInstance("PKCS11", provider)\nkeyStore.load(null, pin)\n→ fresh snapshot of current token objects
+      activate HSM
+      HSM --> Config : KeyStore:\n  privkey  mykey          (ID=01)\n  cert     mykey          (ID=01)\n  privkey  mykey-staging  (ID=02)\n  cert     mykey-staging  (ID=02)
+      deactivate HSM
+    Config --> Endpoint : KeyStore (all 4 objects)
+    deactivate Config
+
+    Endpoint -> Config : buildBundle(keyStore, "mykey-staging")
+    activate Config
+      Config -> Config : SslStoreBundle.of(ks, pin, null)\nSslBundleKey.of(pin, "mykey-staging")\nSslBundle.of(stores, key)
+    Config --> Endpoint : SslBundle  [alias=mykey-staging]
+    deactivate Config
+
+    Endpoint -> Tomcat : sslBundleRegistry.updateBundle(\n    "pkcs11-bundle", newBundle)
+    activate Tomcat
+      Tomcat -> Tomcat : fires registered change listeners\n→ SslConnectorCustomizer.update(newBundle)\n→ in-place SSL context swap\n   (no existing connections dropped)
+    Tomcat --> Endpoint : updated
+    deactivate Tomcat
+
+  Script <-- Endpoint : HTTP 200\n"pkcs11-bundle reloaded ... alias 'mykey-staging'"
+  deactivate Endpoint
+
+  note over Tomcat
+    <b>Tomcat now serving: mykey-staging (ID=02)</b>
+    Old canonical (mykey/ID=01) still in HSM — safe to delete.
+  end note
+
+  ' ── Promote staging → canonical ────────────────────────────────────────────
+
+  Script -> HSM : pkcs11-tool --delete-object privkey+cert  ID=01\n             (remove old canonical; Tomcat is on ID=02)
+
+  note over HSM
+    <b>HSM — old canonical deleted; staging serving Tomcat</b>
+    privkey  mykey-staging  (ID=02)  ← Tomcat active
+    cert     mykey-staging  (ID=02)  ← Tomcat active
+  end note
+
+  Script -> HSM : pkcs11-tool --write-object privkey  label=mykey  ID=01  (new cert)
+  Script -> HSM : pkcs11-tool --write-object cert     label=mykey  ID=01
+
+  note over HSM
+    <b>HSM — new canonical ready; staging still serving Tomcat (zero-downtime gap)</b>
+    privkey  mykey          (ID=01)  ← new canonical (ready)
+    cert     mykey          (ID=01)  ← new canonical (ready)
+    privkey  mykey-staging  (ID=02)  ← Tomcat still active
+    cert     mykey-staging  (ID=02)  ← Tomcat still active
+  end note
+
+  ' ── Reload #2 — switch Tomcat to new canonical ─────────────────────────────
+
+  Script -> Endpoint : POST https://localhost:8443/ssl/reload\n<size:9>(no ?alias param → falls back to canonical keyAlias)</size>
+  activate Endpoint
+
+    Endpoint -> Endpoint : Security.getProvider("SunPKCS11-SoftHSM")
+
+    Endpoint -> Endpoint : effectiveAlias = pkcs11SslConfig.keyAlias\n= "mykey"  (from application.yml; no param given)
+
+    Endpoint -> Config : loadKeyStore(provider)
+    activate Config
+      Config -> HSM : keyStore.load(null, pin)\n→ fresh snapshot of current token objects
+      activate HSM
+      HSM --> Config : KeyStore:\n  privkey  mykey          (ID=01)  [new cert]\n  cert     mykey          (ID=01)  [new cert]\n  privkey  mykey-staging  (ID=02)\n  cert     mykey-staging  (ID=02)
+      deactivate HSM
+    Config --> Endpoint : KeyStore (all 4 objects)
+    deactivate Config
+
+    Endpoint -> Config : buildBundle(keyStore, "mykey")
+    activate Config
+      Config -> Config : SslStoreBundle.of(ks, pin, null)\nSslBundleKey.of(pin, "mykey")\nSslBundle.of(stores, key)
+    Config --> Endpoint : SslBundle  [alias=mykey]
+    deactivate Config
+
+    Endpoint -> Tomcat : sslBundleRegistry.updateBundle(\n    "pkcs11-bundle", newBundle)
+    activate Tomcat
+      Tomcat -> Tomcat : SslConnectorCustomizer.update(newBundle)\n→ in-place SSL context swap
+    Tomcat --> Endpoint : updated
+    deactivate Tomcat
+
+  Script <-- Endpoint : HTTP 200\n"pkcs11-bundle reloaded ... alias 'mykey'"
+  deactivate Endpoint
+
+  note over Tomcat
+    <b>Tomcat now serving: mykey (ID=01)</b>  [new certificate]
+    Staging (ID=02) no longer needed — safe to delete.
+  end note
+
+  ' ── Cleanup staging ────────────────────────────────────────────────────────
+
+  Script -> HSM : pkcs11-tool --delete-object privkey+cert  ID=02\n             (staging safe to remove — Tomcat is on canonical)
+
+  note over HSM
+    <b>HSM — rotation complete; zero downtime achieved</b>
+    privkey  mykey  (ID=01)  ✓  active
+    cert     mykey  (ID=01)  ✓  active
+  end note
+
+end
+
+@enduml
