@@ -103,9 +103,16 @@ find /usr -name libsofthsm2.so 2>/dev/null
 
 ---
 
-## 4. Initialise the HSM token and import a key
+## 4. Create the organizational CA and initialise the HSM
 
-Run the provided setup script **once**:
+Create the shared org CA first (signs both server and client certificates):
+
+```bash
+chmod +x certs/setup-ca.sh
+./certs/setup-ca.sh
+```
+
+Then initialise SoftHSM and import a **CA-signed** server key + certificate:
 
 ```bash
 chmod +x setup-softhsm.sh
@@ -115,9 +122,15 @@ chmod +x setup-softhsm.sh
 The script performs these steps automatically:
 
 1. Initialises a SoftHSM2 token labelled `springboot` (skipped if it already exists).
-2. Generates an RSA-2048 private key and a self-signed certificate with OpenSSL.
+2. Generates an RSA-2048 server key and CSR, signed by the org CA.
 3. Imports the private key into the HSM token as `mykey`.
-4. Imports the certificate into the HSM token as `mykey`.
+4. Imports the CA-signed certificate into the HSM token as `mykey`.
+
+Issue client certificates for mTLS (one per client):
+
+```bash
+./certs/generate-client-cert.sh alice
+```
 
 If your `libsofthsm2.so` is not at the default path, override it:
 
@@ -175,15 +188,18 @@ The server starts two listeners:
 
 ## 7. Test the endpoints
 
-### Hello endpoint (HTTPS)
+### Hello endpoint (HTTPS + mTLS)
 
 ```bash
-curl -k https://localhost:8443/hello
+curl --cacert certs/ca/ca.crt \
+     --cert certs/clients/alice/client.crt \
+     --key certs/clients/alice/client.key \
+     https://localhost:8443/hello
 # Response: Hello, World!
 ```
 
-The `-k` flag skips certificate verification because the certificate is
-self-signed. In production, use a CA-signed certificate instead.
+The server presents a CA-signed certificate from SoftHSM. Clients must present
+a certificate signed by the same org CA (`client-auth: need`).
 
 ### Hot-reload TLS certificate
 

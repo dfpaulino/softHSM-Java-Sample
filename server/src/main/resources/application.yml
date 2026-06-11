@@ -17,3 +17,11 @@ pkcs11:
   # This port remains reachable during certificate rotation when HTTPS may be
   # temporarily unavailable. Only accessible locally — do not expose externally.
   management-port: 8080
+
+  # PKCS#12 truststore containing the organizational CA certificate.
+  # Any client cert signed by this CA is accepted. Populate with: ./certs/setup-ca.sh
+  truststore-file: server/certs/truststore.p12
+  truststore-password: "123456"
+
+  # Require clients to present a certificate trusted by the truststore (mTLS).
+  client-auth: need

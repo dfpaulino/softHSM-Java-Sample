@@ -17,6 +17,7 @@ import org.springframework.stereotype.Component;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.InetAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -50,6 +51,15 @@ public class Pkcs11SslConfig implements WebServerFactoryCustomizer<TomcatServlet
     @Value("${pkcs11.management-port:8080}")
     public int managementPort;
 
+    @Value("${pkcs11.truststore-file:}")
+    private String truststoreFile;
+
+    @Value("${pkcs11.truststore-password:}")
+    private String truststorePassword;
+
+    @Value("${pkcs11.client-auth:need}")
+    private String clientAuth;
+
     @Autowired
     private SslBundleRegistry sslBundleRegistry;
 
@@ -65,6 +75,7 @@ public class Pkcs11SslConfig implements WebServerFactoryCustomizer<TomcatServlet
         // SslConnectorCustomizer.update() whenever updateBundle() is invoked.
         Ssl ssl = new Ssl();
         ssl.setBundle(BUNDLE_NAME);
+        ssl.setClientAuth(Ssl.ClientAuth.valueOf(clientAuth.toUpperCase()));
         factory.setSsl(ssl);
 
         // Plain HTTP connector bound to loopback, used as a management fallback
@@ -118,6 +129,22 @@ public class Pkcs11SslConfig implements WebServerFactoryCustomizer<TomcatServlet
         }
     }
 
+    public KeyStore loadTrustStore() {
+        if (truststoreFile == null || truststoreFile.isBlank()) {
+            return null;
+        }
+        try {
+            Path path = resolveResourcePath(truststoreFile);
+            KeyStore trustStore = KeyStore.getInstance("PKCS12");
+            try (InputStream in = Files.newInputStream(path)) {
+                trustStore.load(in, truststorePassword.toCharArray());
+            }
+            return trustStore;
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to load truststore: " + truststoreFile, e);
+        }
+    }
+
     /**
      * Builds a Spring Boot SslBundle using the configured default key alias.
      * Called at startup.
@@ -132,25 +159,29 @@ public class Pkcs11SslConfig implements WebServerFactoryCustomizer<TomcatServlet
      * promoted to the canonical alias.
      */
     public SslBundle buildBundle(KeyStore keyStore, String alias) {
-        SslStoreBundle stores = SslStoreBundle.of(keyStore, pin, null);
+        SslStoreBundle stores = SslStoreBundle.of(keyStore, pin, loadTrustStore());
         SslBundleKey key = SslBundleKey.of(pin, alias);
         return SslBundle.of(stores, key);
     }
 
-    private String resolveConfigFilePath() throws IOException {
-        Path path = Paths.get(configFile);
+    private Path resolveResourcePath(String location) throws IOException {
+        Path path = Paths.get(location);
         if (Files.exists(path)) {
-            return path.toAbsolutePath().toString();
+            return path.toAbsolutePath();
         }
 
-        ClassPathResource resource = new ClassPathResource(configFile);
+        ClassPathResource resource = new ClassPathResource(location);
         if (resource.exists()) {
-            File tempFile = File.createTempFile("pkcs11-", ".cfg");
+            File tempFile = File.createTempFile("pkcs11-resource-", ".tmp");
             tempFile.deleteOnExit();
             Files.copy(resource.getInputStream(), tempFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
-            return tempFile.getAbsolutePath();
+            return tempFile.toPath();
         }
 
-        throw new FileNotFoundException("PKCS#11 config file not found: " + configFile);
+        throw new FileNotFoundException("Resource not found: " + location);
+    }
+
+    private String resolveConfigFilePath() throws IOException {
+        return resolveResourcePath(configFile).toString();
     }
 }
