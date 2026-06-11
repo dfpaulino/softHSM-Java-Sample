@@ -1,12 +1,22 @@
 # Spring Boot PKCS#11 / SoftHSM Demo
 
-A Spring Boot application that serves HTTPS using a private key stored in a
-software HSM (Hardware Security Module) via the PKCS#11 standard. The key never
-leaves the HSM — the JVM's built-in `SunPKCS11` provider delegates all crypto
-operations to SoftHSM2.
+A multi-module Maven project with a Spring Boot server that serves HTTPS using
+a private key stored in a software HSM (Hardware Security Module) via the
+PKCS#11 standard. The key never leaves the HSM — the JVM's built-in
+`SunPKCS11` provider delegates all crypto operations to SoftHSM2.
 
 Bonus feature: the TLS certificate can be **hot-reloaded** without restarting
 the application.
+
+## Modules
+
+| Module | Artifact | Description |
+|---|---|---|
+| `server` | `spring-pkcs11-server` | PKCS#11 HTTPS server with hot-reload |
+| `client` | `spring-pkcs11-client` | Spring Boot client shell (placeholder) |
+
+The parent POM (`spring-pkcs11`) centralises the Spring Boot version and
+shared dependency versions for both modules.
 
 ---
 
@@ -15,7 +25,7 @@ the application.
 | Requirement | Version |
 |---|---|
 | Java | 21+ |
-| Maven | 3.9+ (or use the included `./mvnw` wrapper) |
+| Maven | 3.9+ |
 | SoftHSM2 | 2.x |
 | OpenSC (`pkcs11-tool`) | any recent |
 | OpenSSL | any recent |
@@ -76,7 +86,7 @@ export SOFTHSM2_CONF=~/.config/softhsm2/softhsm2.conf
 
 ## 3. Find the SoftHSM2 library path
 
-The PKCS#11 config (`src/main/resources/pkcs11.cfg`) and the setup script both
+The PKCS#11 config (`server/src/main/resources/pkcs11.cfg`) and the setup script both
 need the path to `libsofthsm2.so`. Common locations:
 
 | Distro | Path |
@@ -128,7 +138,7 @@ pkcs11-tool --module /usr/lib/softhsm/libsofthsm2.so \
 
 ## 5. Adjust the PKCS#11 config (if needed)
 
-Open `src/main/resources/pkcs11.cfg` and confirm the `library` path matches
+Open `server/src/main/resources/pkcs11.cfg` and confirm the `library` path matches
 your system:
 
 ```
@@ -141,20 +151,20 @@ Change `library` if your path differs (see table in step 3).
 
 ---
 
-## 6. Run the application
+## 6. Run the server
 
 ```bash
-./mvnw spring-boot:run
+mvn -pl server spring-boot:run
 ```
 
 Or build a JAR first:
 
 ```bash
-./mvnw package -DskipTests
-java -jar target/spring-pkcs11-1.0.0-SNAPSHOT.jar
+mvn -pl server package -DskipTests
+java -jar server/target/spring-pkcs11-server-1.0.0-SNAPSHOT.jar
 ```
 
-The application starts two listeners:
+The server starts two listeners:
 
 | Port | Protocol | Purpose |
 |---|---|---|
@@ -196,7 +206,7 @@ curl -X POST http://localhost:8080/ssl/reload
 
 ## Configuration reference
 
-All settings live in `src/main/resources/application.yml`:
+All server settings live in `server/src/main/resources/application.yml`:
 
 | Property | Default | Description |
 |---|---|---|
@@ -211,18 +221,26 @@ All settings live in `src/main/resources/application.yml`:
 ## Project structure
 
 ```
-src/main/java/com/example/springpkcs11/
-├── SpringPkcs11Application.java          Entry point
-├── config/
-│   └── Pkcs11SslConfig.java              Registers SunPKCS11 provider, builds
-│                                         SslBundle, wires Tomcat
-└── controller/
-    ├── HelloController.java              GET /hello
-    └── SslReloadController.java          POST /ssl/reload (hot-reload TLS)
+pom.xml                                   Parent POM (Spring Boot version, modules)
 
-src/main/resources/
-├── application.yml                       Application configuration
-└── pkcs11.cfg                            SunPKCS11 provider configuration
+server/
+├── pom.xml
+└── src/main/java/com/example/springpkcs11/
+    ├── SpringPkcs11Application.java      Server entry point
+    ├── config/
+    │   └── Pkcs11SslConfig.java          Registers SunPKCS11 provider, builds
+    │                                     SslBundle, wires Tomcat
+    └── controller/
+        ├── HelloController.java          GET /hello
+        └── SslReloadController.java      POST /ssl/reload (hot-reload TLS)
+└── src/main/resources/
+    ├── application.yml                   Server configuration
+    └── pkcs11.cfg                        SunPKCS11 provider configuration
+
+client/
+├── pom.xml
+└── src/main/java/com/example/springpkcs11/client/
+    └── SpringPkcs11ClientApplication.java   Client entry point (shell)
 
 setup-softhsm.sh                          One-time HSM initialisation script
 ```

@@ -5,7 +5,7 @@ pkcs11:
   # Path to the SunPKCS11 provider config file.
   # Can be a relative path (resolved against the working directory)
   # or an absolute path. Falls back to classpath lookup.
-  config-file: src/main/resources/pkcs11.cfg
+  config-file: server/src/main/resources/pkcs11.cfg
 
   # User PIN set when the SoftHSM token was initialised (see setup-softhsm.sh).
   pin: "1234"

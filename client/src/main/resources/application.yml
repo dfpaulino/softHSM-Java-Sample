@@ -1,0 +1,6 @@
+spring:
+  application:
+    name: spring-pkcs11-client
+
+server:
+  port: 8081
