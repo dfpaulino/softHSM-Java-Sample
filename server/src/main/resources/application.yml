@@ -1,5 +1,7 @@
 server:
   port: 8443
+  http2:
+    enabled: false
 
 pkcs11:
   # Path to the SunPKCS11 provider config file.
