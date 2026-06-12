@@ -13,7 +13,7 @@ the application.
 | Module | Artifact | Description |
 |---|---|---|
 | `server` | `spring-pkcs11-server` | PKCS#11 HTTPS server with hot-reload |
-| `client` | `spring-pkcs11-client` | Spring Boot client shell (placeholder) |
+| `client` | `spring-pkcs11-client` | Spring Boot WebClient mTLS caller (PKCS#11 identity) |
 
 The parent POM (`spring-pkcs11`) centralises the Spring Boot version and
 shared dependency versions for both modules.
@@ -132,6 +132,15 @@ Issue client certificates for mTLS (one per client):
 ./certs/generate-client-cert.sh alice
 ```
 
+Import the client certificate/private key into a **separate client token**:
+
+```bash
+chmod +x setup-client-softhsm.sh
+./setup-client-softhsm.sh alice
+```
+
+This keeps the client identity in HSM too (not in a file keystore at runtime).
+
 If your `libsofthsm2.so` is not at the default path, override it:
 
 ```bash
@@ -201,6 +210,30 @@ curl --cacert certs/ca/ca.crt \
 The server presents a CA-signed certificate from SoftHSM. Clients must present
 a certificate signed by the same org CA (`client-auth: need`).
 
+### Java WebClient module (HTTPS + mTLS via PKCS#11)
+
+The `client` module mirrors the server SSL-bundle methodology:
+- registers a PKCS#11-backed `SslBundle` in `SslBundleRegistry`,
+- applies that bundle to `WebClient` via `WebClientSsl.fromBundle(...)`.
+
+Before running the client module:
+1. Make sure the client token/alias exists (`./setup-client-softhsm.sh alice`).
+2. Confirm `client/src/main/resources/client-pkcs11.cfg` points to the correct
+   SoftHSM slot (`softhsm2-util --show-slots`).
+3. Ensure `client.ssl.truststore-file` points to a truststore containing the org CA.
+
+Run:
+
+```bash
+mvn -pl client spring-boot:run
+```
+
+Expected log:
+
+```text
+mTLS call succeeded: GET /hello -> Hello, World!
+```
+
 ### Hot-reload TLS certificate
 
 Rotate the key/certificate in SoftHSM and reload without restarting:
@@ -222,7 +255,7 @@ curl -X POST http://localhost:8080/ssl/reload
 
 ## Configuration reference
 
-All server settings live in `server/src/main/resources/application.yml`:
+Server settings live in `server/src/main/resources/application.yml`:
 
 | Property | Default | Description |
 |---|---|---|
@@ -231,6 +264,19 @@ All server settings live in `server/src/main/resources/application.yml`:
 | `pkcs11.key-alias` | `mykey` | Label of the private key object in the HSM |
 | `pkcs11.management-port` | `8080` | Plain HTTP port for the `/ssl/reload` endpoint |
 | `server.port` | `8443` | HTTPS port |
+
+Client settings live in `client/src/main/resources/application.yml`:
+
+| Property | Default | Description |
+|---|---|---|
+| `client.server.base-url` | `https://localhost:8443` | Server base URL for outgoing calls |
+| `client.server.hello-path` | `/hello` | Endpoint path called by `HelloClientRunner` |
+| `client.pkcs11.config-file` | `client/src/main/resources/client-pkcs11.cfg` | Path to client SunPKCS11 config |
+| `client.pkcs11.provider-name` | `SunPKCS11-SoftHSMClient` | Expected JVM provider name after configuration |
+| `client.pkcs11.pin` | `1234` | Client token user PIN |
+| `client.pkcs11.key-alias` | `alice` | Client key alias in HSM token |
+| `client.ssl.truststore-file` | `server/certs/truststore.p12` | Truststore containing org CA to validate server cert |
+| `client.ssl.truststore-password` | `123456` | Truststore password |
 
 ---
 
@@ -256,9 +302,17 @@ server/
 client/
 ├── pom.xml
 └── src/main/java/com/example/springpkcs11/client/
-    └── SpringPkcs11ClientApplication.java   Client entry point (shell)
+    ├── SpringPkcs11ClientApplication.java   Client entry point
+    ├── HelloClientRunner.java               Calls GET /hello over mTLS
+    └── config/
+        ├── ClientPkcs11SslConfig.java       Registers client SSL bundle (PKCS#11 + truststore)
+        └── ClientWebClientConfig.java       Builds WebClient from registered SSL bundle
+└── src/main/resources/
+    ├── application.yml                       Client configuration
+    └── client-pkcs11.cfg                     Client SunPKCS11 provider configuration
 
 setup-softhsm.sh                          One-time HSM initialisation script
+setup-client-softhsm.sh                   Client token import helper
 ```
 
 ---

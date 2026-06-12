@@ -1,6 +1,29 @@
 spring:
   application:
     name: spring-pkcs11-client
+  main:
+    # CLI-style client; no embedded HTTP server.
+    web-application-type: none
 
-server:
-  port: 8081
+client:
+  server:
+    base-url: https://localhost:8443
+    hello-path: /hello
+    request-timeout-seconds: 15
+
+  pkcs11:
+    # Client-side SunPKCS11 provider config for the client token/slot.
+    config-file: client/src/main/resources/client-pkcs11.cfg
+    # SoftHSM provider name built as: SunPKCS11-<name in cfg>.
+    provider-name: SunPKCS11-SoftHSMClient
+    # Client token user PIN.
+    pin: "1234"
+    # Alias label in HSM for the client private key/certificate.
+    key-alias: client-1
+
+
+  ssl:
+    # Trust anchor for validating the server certificate chain.
+    # setup-ca.sh populates this truststore with the organizational CA.
+    truststore-file: server/certs/truststore.p12
+    truststore-password: "123456"
